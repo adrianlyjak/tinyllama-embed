@@ -3,3 +3,5 @@ accelerate
 datasets
 torch
 peft
+accelerate
+bitsandbytes
