@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Union, List, Optional, Any
 
 import torch
 from torch.nn import functional as F
@@ -17,12 +17,16 @@ from datasets import load_dataset, DatasetDict, Dataset
 from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model, TaskType
 
 
-def load_model() -> (LlamaModel, AutoTokenizer):
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
+def load_model(bits: int = 4) -> (LlamaModel, AutoTokenizer):
+    bnb_config = (
+        BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+        if bits == 4
+        else BitsAndBytesConfig(load_in_8bit=True)
     )
 
     model = LlamaModel.from_pretrained(
@@ -33,7 +37,9 @@ def load_model() -> (LlamaModel, AutoTokenizer):
         torch_dtype=torch.float16,
     )
     tokenizer = AutoTokenizer.from_pretrained(
-        "TinyLlama/TinyLlama-1.1B-intermediate-step-1195k-token-2.5T"
+        "TinyLlama/TinyLlama-1.1B-intermediate-step-1195k-token-2.5T",
+        add_eos_token=True,
+        use_fast=True,
     )
     # consider and experiment withadding a specific pad token
     # tokenizer.add_special_tokens({'pad_token': '[PAD]'})
@@ -97,9 +103,17 @@ class Tokenize:
         }
 
 
-def load_model_for_training(model: LlamaModel) -> LlamaModel:
-    peft_config = LoraConfig(
-        task_type=TaskType.FEATURE_EXTRACTION,
+@dataclass
+class PeftConfig:
+    r: int
+    lora_alpha: int
+    lora_dropout: float
+    target_modules: List[str]
+
+
+def load_model_for_training(
+    model: LlamaModel,
+    peft_config: PeftConfig = PeftConfig(
         r=8,
         lora_alpha=64,
         lora_dropout=0.1,
@@ -111,6 +125,14 @@ def load_model_for_training(model: LlamaModel) -> LlamaModel:
             "up_proj",
             "gate_proj",
         ],
+    ),
+) -> LlamaModel:
+    peft_config = LoraConfig(
+        task_type=TaskType.FEATURE_EXTRACTION,
+        r=peft_config.r,
+        lora_alpha=peft_config.lora_alpha,
+        lora_dropout=peft_config.lora_dropout,
+        target_modules=peft_config.target_modules,
         inference_mode=False,
     )
     model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
@@ -132,6 +154,7 @@ class TinyEmbedTrainer(Trainer):
         train_dataset: Dataset,
         eval_dataset: Dataset,
         tokenizer: AutoTokenizer,
+        callback: Optional[Any] = None,
     ):
         # Consider reworking the model's signature to conform to training expectations
         args.remove_unused_columns = False
@@ -142,6 +165,7 @@ class TinyEmbedTrainer(Trainer):
             eval_dataset=eval_dataset,
             tokenizer=tokenizer,
             data_collator=self._map_collate_fn,
+            callbacks=callback,
         )
         # self.train_dataset = train_dataset
         # self.eval_dataset = eval_dataset

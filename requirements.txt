@@ -5,3 +5,6 @@ torch
 peft
 accelerate
 bitsandbytes
+optuna
+optuna-dashboard
+tensorboard
