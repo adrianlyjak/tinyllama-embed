@@ -16,7 +16,7 @@ from transformers import (
     LlamaModel,
     TrainerCallback,
 )
-
+from typing import List
 from train import TinyEmbedTrainer, PeftConfig
 from train import load_model_for_training, prepare_dataset, load_model
 from experiment_config import (
@@ -43,8 +43,18 @@ class TrainExperiment:
     tokenizer: AutoTokenizer
 
     def objective(self, trial: Trial):
-
-        r_exp = trial.suggest_int("r_exp", 0, 5)
+        """
+        lora dropout = 0
+        bits = 4
+        reduce  range of adam epsilons to explore
+        reduce range of adame beta to explore
+        reduce range of adam beta2 to explore
+        lora alpha [64,128,256,512]
+        infonce max of 0.0625, explore lower
+        r = 8
+        batch size max 8
+        """
+        r_exp = trial.suggest_int("r_exp", 3, 3)
         r = 2**r_exp
         trial.set_user_attr("r", r)
         modules = [
@@ -55,23 +65,23 @@ class TrainExperiment:
             "up_proj",
             "gate_proj",
         ]
-        adam_beta1 = trial.suggest_float("adam_beta1", 0.85, 0.95, step=0.01)
-        adam_beta2 = trial.suggest_float("adam_beta2", 0.99, 0.9999, step=0.0001)
-        adam_epsilon = trial.suggest_float("adam_epsilon", 1e-10, 1e-6, log=True)
-        lora_dropout = trial.suggest_float("lora_dropout", 0.0, 0.5, step=0.1)
-        infonce_temp_exp_high = 5
-        infonce_temp_exp = trial.suggest_int("infonce_temp_exp", 1, 3)
+        adam_beta1 = trial.suggest_float("adam_beta1", 0.89, 0.91, step=0.005)
+        adam_beta2 = trial.suggest_float("adam_beta2", 0.990, 0.999, step=0.001)
+        adam_epsilon = trial.suggest_float("adam_epsilon", 1e-11, 1e-9, log=True)
+        lora_dropout = trial.suggest_float("lora_dropout", 0.0, 0.0, step=0.1)
+        infonce_temp_exp_high = 8
+        infonce_temp_exp = trial.suggest_int("infonce_temp_exp", 1, 6, step=1)
         infonce_temp = 2**infonce_temp_exp / (2**infonce_temp_exp_high)
         trial.set_user_attr("infonce_temp", infonce_temp)
 
         # For lora_alpha, suggest a power of 2
-        lora_alpha_exp = trial.suggest_int("lora_alpha_exp", 2, 8, step=1)
+        lora_alpha_exp = trial.suggest_int("lora_alpha_exp", 6, 9, step=1)
         lora_alpha = 2**lora_alpha_exp
         trial.set_user_attr("lora_alpha", lora_alpha)
-        batch_size_exp = trial.suggest_int("batch_size_exp", 0, 3, step=1)
+        batch_size_exp = trial.suggest_int("batch_size_exp", 0, 4, step=1)
         batch_size = 2**batch_size_exp
         trial.set_user_attr("batch_size", batch_size)
-        bits = trial.suggest_categorical("bits", [4, 8])
+        bits = trial.suggest_categorical("bits", [4])
 
         base_model = self.base4 if bits == 4 else self.base8
         tokenizer = self.tokenizer
@@ -121,7 +131,7 @@ class TrainExperiment:
             logging_strategy=IntervalStrategy.STEPS,
             gradient_checkpointing=True,
             logging_steps=5,
-            max_steps=100,
+            max_steps=150,
             save_steps=1000,
             seed=seed,
             adam_beta1=adam_beta1,
@@ -148,9 +158,10 @@ class TrainExperiment:
         ]
         initial_loss = loss_history[0]
         static_initial_loss = 0.7
-        final_loss = loss_history[-1]
+        most_recent_loss = smooth(loss_history, 0.4)[-3:]
+        mean_final_loss = sum(most_recent_loss) / len(most_recent_loss)
         change_in_loss_per_second = (
-            static_initial_loss - final_loss
+            static_initial_loss - mean_final_loss
         ) / duration_seconds
         # write experiment
         record_trial_result(
@@ -158,14 +169,15 @@ class TrainExperiment:
             self.version,
             run_number,
             {
-                "loss": final_loss,
+                "loss": mean_final_loss,
                 "initial_loss": initial_loss,
-                "final_loss": final_loss,
+                "final_loss": loss_history[-1],
                 "change_in_loss_per_second": change_in_loss_per_second,
                 "history": loss_history,
             },
         )
-        trial.set_user_attr("final_loss", final_loss)
+        trial.set_user_attr("loss", mean_final_loss)
+        trial.set_user_attr("final_loss", loss_history[-1])
         trial.set_user_attr("duration_seconds", duration_seconds)
         trial.set_user_attr("initial_loss", initial_loss)
         trial.set_user_attr("change_in_loss_per_second", change_in_loss_per_second)
@@ -174,13 +186,26 @@ class TrainExperiment:
         return change_in_loss_per_second
 
 
+def smooth(
+    scalars: List[float], weight: float
+) -> List[float]:  # Weight between 0 and 1
+    last = scalars[0]  # First value in the plot (first timestep)
+    smoothed = list()
+    for point in scalars:
+        smoothed_val = last * weight + (1 - weight) * point  # Calculate smoothed value
+        smoothed.append(smoothed_val)  # Save it
+        last = smoothed_val  # Anchor the last smoothed value
+
+    return smoothed
+
+
 # Add stream handler of stdout to show the messages
 optuna.logging.get_logger("optuna").addHandler(logging.StreamHandler(sys.stdout))
 
 
 def run():
     cfg = get_config()
-    resume = True
+    resume = False
     if resume:
         version = cfg.get("all_version") or 0
     else:
