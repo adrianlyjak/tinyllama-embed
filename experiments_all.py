@@ -5,6 +5,7 @@ First, optimize bits of quantization
 import logging
 import sys
 import time
+import math
 
 import optuna
 from optuna import Trial
@@ -43,7 +44,9 @@ class TrainExperiment:
 
     def objective(self, trial: Trial):
 
-        r = trial.suggest_categorical("r", [1, 2, 4, 8, 16, 32])
+        r_exp = trial.suggest_int("r_exp", 0, 5)
+        r = 2**r_exp
+        trial.set_user_attr("r", r)
         modules = [
             "q_proj",
             "v_proj",
@@ -56,10 +59,18 @@ class TrainExperiment:
         adam_beta2 = trial.suggest_float("adam_beta2", 0.99, 0.9999, step=0.0001)
         adam_epsilon = trial.suggest_float("adam_epsilon", 1e-10, 1e-6, log=True)
         lora_dropout = trial.suggest_float("lora_dropout", 0.0, 0.5, step=0.1)
+        infonce_temp_exp_high = 5
+        infonce_temp_exp = trial.suggest_int("infonce_temp_exp", 1, 3)
+        infonce_temp = 2**infonce_temp_exp / (2**infonce_temp_exp_high)
+        trial.set_user_attr("infonce_temp", infonce_temp)
 
         # For lora_alpha, suggest a power of 2
-        lora_alpha = trial.suggest_categorical("lora_alpha", [2, 4, 8, 16, 32, 64, 128])
-        batch_size = trial.suggest_categorical("batch_size", [2, 4, 8, 16, 32])
+        lora_alpha_exp = trial.suggest_int("lora_alpha_exp", 2, 8, step=1)
+        lora_alpha = 2**lora_alpha_exp
+        trial.set_user_attr("lora_alpha", lora_alpha)
+        batch_size_exp = trial.suggest_int("batch_size_exp", 0, 3, step=1)
+        batch_size = 2**batch_size_exp
+        trial.set_user_attr("batch_size", batch_size)
         bits = trial.suggest_categorical("bits", [4, 8])
 
         base_model = self.base4 if bits == 4 else self.base8
@@ -90,6 +101,9 @@ class TrainExperiment:
                 "lora_alpha": lora_alpha,
                 "lora_dropout": lora_dropout,
                 "r": r,
+                "batch_size": batch_size,
+                "bits": bits,
+                "infonce_temp": infonce_temp,
             },
         )
 
@@ -107,7 +121,7 @@ class TrainExperiment:
             logging_strategy=IntervalStrategy.STEPS,
             gradient_checkpointing=True,
             logging_steps=5,
-            max_steps=150,
+            max_steps=100,
             save_steps=1000,
             seed=seed,
             adam_beta1=adam_beta1,
@@ -122,6 +136,7 @@ class TrainExperiment:
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
             tokenizer=tokenizer,
+            infonce_temp=infonce_temp,
         )
 
         start_time = time.time()
@@ -132,8 +147,11 @@ class TrainExperiment:
             log["loss"] for log in trainer.state.log_history if "loss" in log
         ]
         initial_loss = loss_history[0]
+        static_initial_loss = 0.7
         final_loss = loss_history[-1]
-        change_in_loss_per_second = (initial_loss - final_loss) / duration_seconds
+        change_in_loss_per_second = (
+            static_initial_loss - final_loss
+        ) / duration_seconds
         # write experiment
         record_trial_result(
             "all",
@@ -151,6 +169,7 @@ class TrainExperiment:
         trial.set_user_attr("duration_seconds", duration_seconds)
         trial.set_user_attr("initial_loss", initial_loss)
         trial.set_user_attr("change_in_loss_per_second", change_in_loss_per_second)
+        trial.set_user_attr("version_trial", f"{self.version}.{run_number}")
 
         return change_in_loss_per_second
 
@@ -161,7 +180,7 @@ optuna.logging.get_logger("optuna").addHandler(logging.StreamHandler(sys.stdout)
 
 def run():
     cfg = get_config()
-    resume = False
+    resume = True
     if resume:
         version = cfg.get("all_version") or 0
     else:

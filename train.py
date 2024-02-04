@@ -33,7 +33,6 @@ def load_model(bits: int = 4) -> (LlamaModel, AutoTokenizer):
         "TinyLlama/TinyLlama-1.1B-intermediate-step-1195k-token-2.5T",
         device_map="auto",
         quantization_config=bnb_config,
-        # load_in_4bit=True,
         torch_dtype=torch.float16,
     )
     tokenizer = AutoTokenizer.from_pretrained(
@@ -155,6 +154,7 @@ class TinyEmbedTrainer(Trainer):
         eval_dataset: Dataset,
         tokenizer: AutoTokenizer,
         callback: Optional[Any] = None,
+        infonce_temp: float = 0.1,
     ):
         # Consider reworking the model's signature to conform to training expectations
         args.remove_unused_columns = False
@@ -167,6 +167,7 @@ class TinyEmbedTrainer(Trainer):
             data_collator=self._map_collate_fn,
             callbacks=callback,
         )
+        self.infonce_temp = infonce_temp
         # self.train_dataset = train_dataset
         # self.eval_dataset = eval_dataset
         # self.tokenizer = tokenizer
@@ -222,7 +223,7 @@ class TinyEmbedTrainer(Trainer):
         embeddings = hidden_states[
             torch.arange(hidden_states.size(0)), last_token_indices, :
         ]
-        # Normalize the embeddings
+        # Normalize the embeddings to unit length
         embeddings = F.normalize(embeddings, p=2, dim=1)
         return embeddings
 
@@ -241,14 +242,19 @@ class TinyEmbedTrainer(Trainer):
         )
 
         # Compute InfoNCE loss
-        pos_similarity = torch.sum(query_embeddings * pos_embeddings, dim=1)
-        neg_similarity = torch.sum(query_embeddings * neg_embeddings, dim=1)
-
-        # Compute InfoNCE loss
-        pos_similarity = torch.sum(query_embeddings * pos_embeddings, dim=1)
-        neg_similarity = torch.sum(query_embeddings * neg_embeddings, dim=1)
-        losses = -torch.log(
-            torch.exp(pos_similarity)
-            / (torch.exp(pos_similarity) + torch.exp(neg_similarity))
+        # Stack pos and neg embeddings to create a [batch_size, 2, embedding_size] tensor
+        temperature = self.infonce_temp
+        all_embeddings = torch.stack([pos_embeddings, neg_embeddings], dim=1)
+        scores = (
+            torch.matmul(query_embeddings.unsqueeze(1), all_embeddings.transpose(1, 2))
+            / temperature
         )
-        return losses.mean()
+        scores = scores.squeeze(1)
+
+        # Since positive examples are at index 0 in the second dimension of `all_embeddings`, labels are all zeros
+        labels = torch.zeros(scores.size(0), dtype=torch.long, device=scores.device)
+
+        # Use cross entropy loss
+        loss_fn = torch.nn.CrossEntropyLoss(reduction="mean")
+        loss = loss_fn(scores, labels)
+        return loss
