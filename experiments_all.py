@@ -15,8 +15,10 @@ from transformers import (
     AutoTokenizer,
     LlamaModel,
     TrainerCallback,
+    TrainerState,
+    TrainerCallback,
 )
-from typing import List
+from typing import Callable, List
 from train import TinyEmbedTrainer, PeftConfig
 from train import load_model_for_training, prepare_dataset, load_model
 from experiment_config import (
@@ -41,20 +43,14 @@ class TrainExperiment:
     base8: LlamaModel
     base4: LlamaModel
     tokenizer: AutoTokenizer
+    max_steps: int
+    smoothing: float
+    last_samples: int
+    time_objective: bool
 
     def objective(self, trial: Trial):
-        """
-        lora dropout = 0
-        bits = 4
-        reduce  range of adam epsilons to explore
-        reduce range of adame beta to explore
-        reduce range of adam beta2 to explore
-        lora alpha [64,128,256,512]
-        infonce max of 0.0625, explore lower
-        r = 8
-        batch size max 8
-        """
-        r_exp = trial.suggest_int("r_exp", 3, 3)
+
+        r_exp = trial.suggest_int("r_exp", 3, 6)
         r = 2**r_exp
         trial.set_user_attr("r", r)
         modules = [
@@ -65,20 +61,21 @@ class TrainExperiment:
             "up_proj",
             "gate_proj",
         ]
-        adam_beta1 = trial.suggest_float("adam_beta1", 0.89, 0.91, step=0.005)
-        adam_beta2 = trial.suggest_float("adam_beta2", 0.990, 0.999, step=0.001)
-        adam_epsilon = trial.suggest_float("adam_epsilon", 1e-11, 1e-9, log=True)
+        adam_beta1 = trial.suggest_float("adam_beta1", 0.88, 0.91, step=0.005)
+        adam_beta2 = trial.suggest_float("adam_beta2", 0.995, 0.999, step=0.001)
+        adam_epsilon = trial.suggest_float("adam_epsilon", 1e-10, 2e-7, log=True)
         lora_dropout = trial.suggest_float("lora_dropout", 0.0, 0.0, step=0.1)
-        infonce_temp_exp_high = 8
-        infonce_temp_exp = trial.suggest_int("infonce_temp_exp", 1, 6, step=1)
+        infonce_temp_exp_high = 5
+        infonce_temp_exp = trial.suggest_int("infonce_temp_exp", 0, 3, step=1)
         infonce_temp = 2**infonce_temp_exp / (2**infonce_temp_exp_high)
+        # [0.03125, 0.0625, 0.125, 0.25]
         trial.set_user_attr("infonce_temp", infonce_temp)
 
         # For lora_alpha, suggest a power of 2
-        lora_alpha_exp = trial.suggest_int("lora_alpha_exp", 6, 9, step=1)
-        lora_alpha = 2**lora_alpha_exp
+        lora_alpha_scale_exp = trial.suggest_int("lora_alpha_scale_exp", 0, 2, step=1)
+        lora_alpha = r * 2**lora_alpha_scale_exp
         trial.set_user_attr("lora_alpha", lora_alpha)
-        batch_size_exp = trial.suggest_int("batch_size_exp", 0, 4, step=1)
+        batch_size_exp = trial.suggest_int("batch_size_exp", 3, 3, step=1)
         batch_size = 2**batch_size_exp
         trial.set_user_attr("batch_size", batch_size)
         bits = trial.suggest_categorical("bits", [4])
@@ -130,15 +127,40 @@ class TrainExperiment:
             log_level="info",
             logging_strategy=IntervalStrategy.STEPS,
             gradient_checkpointing=True,
-            logging_steps=5,
-            max_steps=150,
-            save_steps=1000,
+            logging_steps=1,
+            max_steps=self.max_steps,
+            save_steps=100000,
             seed=seed,
             adam_beta1=adam_beta1,
             adam_beta2=adam_beta2,
             adam_epsilon=adam_epsilon,
             report_to="tensorboard",
         )
+
+        start_time = time.time()
+
+        def get_loss() -> LossInfo:
+            current_time = time.time()
+            duration_seconds = current_time - start_time
+            loss_history = [
+                log["loss"] for log in trainer.state.log_history if "loss" in log
+            ]
+
+            static_initial_loss = 0.7
+            most_recent_loss = smooth(loss_history, self.smoothing)[
+                -1 * self.last_samples :
+            ]
+            mean_loss = sum(most_recent_loss) / len(most_recent_loss)
+            change_in_loss_per_second = (
+                static_initial_loss - mean_loss
+            ) / duration_seconds
+            return LossInfo(
+                mean_smoothed_recent_loss=mean_loss,
+                loss_history=loss_history,
+                change_in_loss_per_second=change_in_loss_per_second,
+                seconds=duration_seconds,
+                target=change_in_loss_per_second if self.time_objective else mean_loss,
+            )
 
         trainer = TinyEmbedTrainer(
             model=model,
@@ -147,43 +169,66 @@ class TrainExperiment:
             eval_dataset=eval_dataset,
             tokenizer=tokenizer,
             infonce_temp=infonce_temp,
+            callbacks=[
+                OptunaPruningCallback(
+                    trial,
+                    lambda: get_loss().target,
+                )
+            ],
         )
 
-        start_time = time.time()
         result = trainer.train(resume_from_checkpoint=False, trial=trial)
-        end_time = time.time()
-        duration_seconds = end_time - start_time
-        loss_history = [
-            log["loss"] for log in trainer.state.log_history if "loss" in log
-        ]
-        initial_loss = loss_history[0]
-        static_initial_loss = 0.7
-        most_recent_loss = smooth(loss_history, 0.4)[-3:]
-        mean_final_loss = sum(most_recent_loss) / len(most_recent_loss)
-        change_in_loss_per_second = (
-            static_initial_loss - mean_final_loss
-        ) / duration_seconds
+        loss = get_loss()
+
         # write experiment
         record_trial_result(
             "all",
             self.version,
             run_number,
             {
-                "loss": mean_final_loss,
-                "initial_loss": initial_loss,
-                "final_loss": loss_history[-1],
-                "change_in_loss_per_second": change_in_loss_per_second,
-                "history": loss_history,
+                "loss": loss.mean_smoothed_recent_loss,
+                "final_loss": loss.loss_history[-1],
+                "change_in_loss_per_second": loss.change_in_loss_per_second,
             },
         )
-        trial.set_user_attr("loss", mean_final_loss)
-        trial.set_user_attr("final_loss", loss_history[-1])
-        trial.set_user_attr("duration_seconds", duration_seconds)
-        trial.set_user_attr("initial_loss", initial_loss)
-        trial.set_user_attr("change_in_loss_per_second", change_in_loss_per_second)
+        trial.set_user_attr("loss", loss.mean_smoothed_recent_loss)
+        trial.set_user_attr("final_loss", loss.loss_history[-1])
+        trial.set_user_attr("duration_seconds", loss.seconds)
+        trial.set_user_attr("initial_loss", loss.loss_history[0])
+        trial.set_user_attr("change_in_loss_per_second", loss.change_in_loss_per_second)
         trial.set_user_attr("version_trial", f"{self.version}.{run_number}")
 
-        return change_in_loss_per_second
+        return loss.target
+
+
+@dataclass
+class LossInfo:
+    mean_smoothed_recent_loss: float
+    loss_history: List[float]
+    change_in_loss_per_second: float
+    seconds: float
+    target: float
+
+
+class OptunaPruningCallback(TrainerCallback):
+    def __init__(self, trial: optuna.Trial, evaluate: Callable[[], float]):
+        self.trial = trial
+        self.evaluate = evaluate
+
+    def on_step_end(self, args, state: TrainerState, control, **kwargs):
+        # Retrieve the objective metric from the current evaluation.
+        if len(state.log_history):
+            objective = self.evaluate()
+
+            # Report the current objective to Optuna and potentially prune the trial.
+            self.trial.report(objective, step=state.global_step)
+            should_prune = self.trial.should_prune()
+            print(
+                f"reported {objective} for step {state.global_step}. should_prune: {should_prune}"
+            )
+            if should_prune:
+                message = "Trial was pruned at step {}.".format(state.global_step)
+                raise optuna.exceptions.TrialPruned(message)
 
 
 def smooth(
@@ -215,14 +260,23 @@ def run():
 
     base8, tokenizer = load_model(bits=8)
     base4, _ = load_model(bits=4)
+    is_time_objective = False
     inst = TrainExperiment(
-        version=version, base8=base8, base4=base4, tokenizer=tokenizer
+        version=version,
+        base8=base8,
+        base4=base4,
+        tokenizer=tokenizer,
+        max_steps=30,
+        smoothing=0.99,
+        last_samples=10,
+        time_objective=is_time_objective,
     )
     study = optuna.create_study(
         study_name=f"all-{version}",
         storage="sqlite:///experiments.db",
         load_if_exists=resume,
-        direction="maximize",
+        direction="maximize" if is_time_objective else "minimize",
+        pruner=optuna.pruners.MedianPruner(n_warmup_steps=15, n_startup_trials=3),
     )
     study.optimize(inst.objective, n_trials=100)
 

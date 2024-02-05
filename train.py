@@ -11,6 +11,7 @@ from transformers import (
     Trainer,
     TrainingArguments,
     AutoTokenizer,
+    TrainerCallback,
 )
 from datasets import load_dataset, DatasetDict, Dataset
 
@@ -153,7 +154,7 @@ class TinyEmbedTrainer(Trainer):
         train_dataset: Dataset,
         eval_dataset: Dataset,
         tokenizer: AutoTokenizer,
-        callback: Optional[Any] = None,
+        callbacks: Optional[List[TrainerCallback]] = None,
         infonce_temp: float = 0.1,
     ):
         # Consider reworking the model's signature to conform to training expectations
@@ -165,7 +166,7 @@ class TinyEmbedTrainer(Trainer):
             eval_dataset=eval_dataset,
             tokenizer=tokenizer,
             data_collator=self._map_collate_fn,
-            callbacks=callback,
+            callbacks=callbacks,
         )
         self.infonce_temp = infonce_temp
         # self.train_dataset = train_dataset
