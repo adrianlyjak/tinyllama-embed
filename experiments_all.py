@@ -21,12 +21,7 @@ from transformers import (
 from typing import Callable, List
 from train import TinyEmbedTrainer, PeftConfig
 from train import load_model_for_training, prepare_dataset, load_model
-from experiment_config import (
-    get_config,
-    write_config,
-    record_trial_params,
-    record_trial_result,
-)
+from experiment_config import get_config, write_config
 from dataclasses import dataclass
 import os
 
@@ -97,25 +92,8 @@ class TrainExperiment:
         train_dataset = dataset["train"]
         eval_dataset = dataset["test"]
 
-        # write experiment
-        run_number = record_trial_params(
-            "all",
-            self.version,
-            {
-                "adam_beta1": adam_beta1,
-                "adam_beta2": adam_beta2,
-                "adam_epsilon": adam_epsilon,
-                "lora_alpha": lora_alpha,
-                "lora_dropout": lora_dropout,
-                "r": r,
-                "batch_size": batch_size,
-                "bits": bits,
-                "infonce_temp": infonce_temp,
-            },
-        )
-
-        log_dir = f"./logs_{self.version}.{run_number}"
-        results_dir = f"./results_{self.version}.{run_number}"
+        log_dir = f"./logs/logs_{self.version}.{trial.number}"
+        results_dir = f"./results"
         os.makedirs(log_dir, exist_ok=True)
         os.makedirs(results_dir, exist_ok=True)
 
@@ -180,23 +158,11 @@ class TrainExperiment:
         result = trainer.train(resume_from_checkpoint=False, trial=trial)
         loss = get_loss()
 
-        # write experiment
-        record_trial_result(
-            "all",
-            self.version,
-            run_number,
-            {
-                "loss": loss.mean_smoothed_recent_loss,
-                "final_loss": loss.loss_history[-1],
-                "change_in_loss_per_second": loss.change_in_loss_per_second,
-            },
-        )
         trial.set_user_attr("loss", loss.mean_smoothed_recent_loss)
         trial.set_user_attr("final_loss", loss.loss_history[-1])
         trial.set_user_attr("duration_seconds", loss.seconds)
         trial.set_user_attr("initial_loss", loss.loss_history[0])
         trial.set_user_attr("change_in_loss_per_second", loss.change_in_loss_per_second)
-        trial.set_user_attr("version_trial", f"{self.version}.{run_number}")
 
         return loss.target
 
@@ -223,9 +189,6 @@ class OptunaPruningCallback(TrainerCallback):
             # Report the current objective to Optuna and potentially prune the trial.
             self.trial.report(objective, step=state.global_step)
             should_prune = self.trial.should_prune()
-            print(
-                f"reported {objective} for step {state.global_step}. should_prune: {should_prune}"
-            )
             if should_prune:
                 message = "Trial was pruned at step {}.".format(state.global_step)
                 raise optuna.exceptions.TrialPruned(message)
@@ -266,9 +229,9 @@ def run():
         base8=base8,
         base4=base4,
         tokenizer=tokenizer,
-        max_steps=30,
+        max_steps=1500,
         smoothing=0.99,
-        last_samples=10,
+        last_samples=20,
         time_objective=is_time_objective,
     )
     study = optuna.create_study(
@@ -276,7 +239,7 @@ def run():
         storage="sqlite:///experiments.db",
         load_if_exists=resume,
         direction="maximize" if is_time_objective else "minimize",
-        pruner=optuna.pruners.MedianPruner(n_warmup_steps=15, n_startup_trials=3),
+        pruner=optuna.pruners.MedianPruner(n_warmup_steps=200, n_startup_trials=3),
     )
     study.optimize(inst.objective, n_trials=100)
 
