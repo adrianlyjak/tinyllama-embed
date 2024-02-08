@@ -45,7 +45,7 @@ class TrainExperiment:
 
     def objective(self, trial: Trial):
 
-        r_exp = trial.suggest_int("r_exp", 3, 6)
+        r_exp = trial.suggest_int("r_exp", 4, 4)
         r = 2**r_exp
         trial.set_user_attr("r", r)
         modules = [
@@ -56,21 +56,19 @@ class TrainExperiment:
             "up_proj",
             "gate_proj",
         ]
-        adam_beta1 = trial.suggest_float("adam_beta1", 0.88, 0.91, step=0.005)
-        adam_beta2 = trial.suggest_float("adam_beta2", 0.995, 0.999, step=0.001)
-        adam_epsilon = trial.suggest_float("adam_epsilon", 1e-10, 2e-7, log=True)
+        adam_beta1 = trial.suggest_float("adam_beta1", 0.9, 0.9, step=0.005)
+        adam_beta2 = trial.suggest_float("adam_beta2", 0.999, 0.999, step=0.001)
+        adam_epsilon = trial.suggest_float("adam_epsilon", 2e-10, 2e-10, log=True)
         lora_dropout = trial.suggest_float("lora_dropout", 0.0, 0.0, step=0.1)
-        infonce_temp_exp_high = 5
-        infonce_temp_exp = trial.suggest_int("infonce_temp_exp", 0, 3, step=1)
-        infonce_temp = 2**infonce_temp_exp / (2**infonce_temp_exp_high)
-        # [0.03125, 0.0625, 0.125, 0.25]
+        infonce_temp = trial.suggest_float("infonce_temp", 0.025, 0.025, step=0.005)
+
         trial.set_user_attr("infonce_temp", infonce_temp)
 
         # For lora_alpha, suggest a power of 2
-        lora_alpha_scale_exp = trial.suggest_int("lora_alpha_scale_exp", 0, 2, step=1)
+        lora_alpha_scale_exp = trial.suggest_int("lora_alpha_scale_exp", 1, 1, step=1)
         lora_alpha = r * 2**lora_alpha_scale_exp
         trial.set_user_attr("lora_alpha", lora_alpha)
-        batch_size_exp = trial.suggest_int("batch_size_exp", 3, 3, step=1)
+        batch_size_exp = trial.suggest_int("batch_size_exp", 2, 2, step=1)
         batch_size = 2**batch_size_exp
         trial.set_user_attr("batch_size", batch_size)
         bits = trial.suggest_categorical("bits", [4])
@@ -148,10 +146,10 @@ class TrainExperiment:
             tokenizer=tokenizer,
             infonce_temp=infonce_temp,
             callbacks=[
-                OptunaPruningCallback(
-                    trial,
-                    lambda: get_loss().target,
-                )
+                # OptunaPruningCallback(
+                #     trial,
+                #     lambda: get_loss().target,
+                # )
             ],
         )
 
@@ -213,7 +211,7 @@ optuna.logging.get_logger("optuna").addHandler(logging.StreamHandler(sys.stdout)
 
 def run():
     cfg = get_config()
-    resume = False
+    resume = True
     if resume:
         version = cfg.get("all_version") or 0
     else:
@@ -229,7 +227,7 @@ def run():
         base8=base8,
         base4=base4,
         tokenizer=tokenizer,
-        max_steps=1500,
+        max_steps=3000,
         smoothing=0.99,
         last_samples=20,
         time_objective=is_time_objective,
@@ -239,9 +237,9 @@ def run():
         storage="sqlite:///experiments.db",
         load_if_exists=resume,
         direction="maximize" if is_time_objective else "minimize",
-        pruner=optuna.pruners.MedianPruner(n_warmup_steps=200, n_startup_trials=3),
+        # pruner=optuna.pruners.MedianPruner(n_warmup_steps=400, n_startup_trials=3),
     )
-    study.optimize(inst.objective, n_trials=100)
+    study.optimize(inst.objective, n_trials=1)
 
 
 if __name__ == "__main__":

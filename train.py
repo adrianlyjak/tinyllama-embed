@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, Union, List, Optional, Any
+from typing import Dict, Union, List, Optional, Any, Tuple
 
 import torch
 from torch.nn import functional as F
@@ -149,7 +149,7 @@ class TinyEmbedTrainer(Trainer):
 
     def __init__(
         self,
-        model,
+        model: LlamaModel,
         args: TrainingArguments,
         train_dataset: Dataset,
         eval_dataset: Dataset,
@@ -181,13 +181,13 @@ class TinyEmbedTrainer(Trainer):
 
         """
 
-        def get_field(field: str):
+        def get_field(field: str, length: Optional[int] = None):
             attention = [item["attention_mask_" + field] for item in batch]
             inputs = [item["input_ids_" + field] for item in batch]
             # probably something wrong at the dataset level... but munge things into the right shape here,
             # truncate the batch to the max length, but also 0 pad those that are less than the max length
             # for both input_ids and attention_mask
-            max_len = max([sum(x) for x in attention])
+            max_len = length if length is not None else max([sum(x) for x in attention])
             attention_mask = []
             input_ids = []
             for i in range(len(attention)):
@@ -207,55 +207,80 @@ class TinyEmbedTrainer(Trainer):
                 ("input_ids_" + field): torch.tensor(input_ids),
             }
 
-        return {**get_field("query"), **get_field("pos"), **get_field("neg")}
+        length = 0
+        for field in ["query", "pos", "neg"]:
+            attention = [item["attention_mask_" + field] for item in batch]
+            length = max([sum(x) for x in attention] + [length])
 
-    def _get_embeddings(
-        self, model, input_ids: torch.Tensor, attention_mask: torch.Tensor
-    ) -> torch.Tensor:
-        outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            output_hidden_states=True,
-        )
-        hidden_states = outputs.hidden_states[-1]  # Get the last hidden states
-        # Compute the indices of the last non-padding tokens
-        sequence_lengths = attention_mask.sum(dim=1)
-        last_token_indices = sequence_lengths - 1
-        embeddings = hidden_states[
-            torch.arange(hidden_states.size(0)), last_token_indices, :
-        ]
-        # Normalize the embeddings to unit length
-        embeddings = F.normalize(embeddings, p=2, dim=1)
-        return embeddings
+        return {
+            **get_field("query", length),
+            **get_field("pos", length),
+            **get_field("neg", length),
+        }
 
     def compute_loss(self, model, inputs, return_outputs=False):
         from datetime import datetime
 
+        batch_size = inputs["input_ids_query"].shape[0]
         # print iso utc 8601 time with milliseconds
-        query_embeddings = self._get_embeddings(
+        query = get_embeddings(
             model, inputs["input_ids_query"], inputs["attention_mask_query"]
         )
-        pos_embeddings = self._get_embeddings(
-            model, inputs["input_ids_pos"], inputs["attention_mask_pos"]
-        )
-        neg_embeddings = self._get_embeddings(
-            model, inputs["input_ids_neg"], inputs["attention_mask_neg"]
+        all_embeddings = get_embeddings(
+            model,
+            torch.cat((inputs["input_ids_pos"], inputs["input_ids_neg"]), dim=0),
+            torch.cat(
+                (inputs["attention_mask_pos"], inputs["attention_mask_neg"]), dim=0
+            ),
         )
 
         # Compute InfoNCE loss
-        # Stack pos and neg embeddings to create a [batch_size, 2, embedding_size] tensor
         temperature = self.infonce_temp
-        all_embeddings = torch.stack([pos_embeddings, neg_embeddings], dim=1)
-        scores = (
-            torch.matmul(query_embeddings.unsqueeze(1), all_embeddings.transpose(1, 2))
-            / temperature
-        )
-        scores = scores.squeeze(1)
+        # query = [Batch, Embedding] * [Embedding, Batch * 2] = [Batch, Batch * 2]
+        scores = torch.matmul(query, all_embeddings.transpose(0, 1)) / temperature
 
         # Since positive examples are at index 0 in the second dimension of `all_embeddings`, labels are all zeros
-        labels = torch.zeros(scores.size(0), dtype=torch.long, device=scores.device)
+        labels = torch.arange(batch_size, device=query.device)
 
         # Use cross entropy loss
         loss_fn = torch.nn.CrossEntropyLoss(reduction="mean")
         loss = loss_fn(scores, labels)
         return loss
+
+
+def get_embeddings_from_text(
+    model: LlamaModel,
+    tokenizer: AutoTokenizer,
+    text: List[str],
+) -> List[Tuple[str, torch.Tensor]]:
+    tokenized = tokenizer(
+        text,
+        padding=True,
+        truncation=True,
+        max_length=512,
+        return_tensors="pt",
+    )
+    embeddings = get_embeddings(
+        model, tokenized["input_ids"], tokenized["attention_mask"]
+    )
+    return [(text[i], embeddings[i]) for i in range(len(text))]
+
+
+def get_embeddings(
+    model: LlamaModel, input_ids: torch.Tensor, attention_mask: torch.Tensor
+) -> torch.Tensor:
+    outputs = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        output_hidden_states=True,
+    )
+    hidden_states = outputs.hidden_states[-1]  # Get the last hidden states
+    # Compute the indices of the last non-padding tokens
+    sequence_lengths = attention_mask.sum(dim=1)
+    last_token_indices = sequence_lengths - 1
+    embeddings = hidden_states[
+        torch.arange(hidden_states.size(0)), last_token_indices, :
+    ]
+    # Normalize the embeddings to unit length
+    embeddings = F.normalize(embeddings, p=2, dim=1)
+    return embeddings
