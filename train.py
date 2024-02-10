@@ -3,6 +3,7 @@ from typing import Dict, Union, List, Optional, Any, Tuple
 
 import torch
 from torch.nn import functional as F
+import math
 
 from transformers import (
     LlamaModel,
@@ -18,7 +19,7 @@ from datasets import load_dataset, DatasetDict, Dataset
 from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model, TaskType
 
 
-def load_model(bits: int = 4) -> (LlamaModel, AutoTokenizer):
+def load_model(bits: int = 4) -> Tuple[LlamaModel, AutoTokenizer]:
     bnb_config = (
         BitsAndBytesConfig(
             load_in_4bit=True,
@@ -72,34 +73,24 @@ class Tokenize:
     # Tokenize the dataset
     def tokenize_function(self, examples: Dict[str, str]) -> Dict[str, torch.Tensor]:
         max_len = 512
-        tokenized_query = self.tokenizer(
-            examples["query"],
-            padding=True,
-            truncation=True,
-            max_length=max_len,
-            return_tensors="pt",
-        )
-        tokenized_pos = self.tokenizer(
-            examples["pos"],
-            padding=True,
-            truncation=True,
-            max_length=max_len,
-            return_tensors="pt",
-        )
-        tokenized_neg = self.tokenizer(
-            examples["neg"],
-            padding=True,
-            truncation=True,
-            max_length=max_len,
-            return_tensors="pt",
-        )
+
+        def tokenize(path: str) -> Dict[str, torch.Tensor]:
+            token_dict = self.tokenizer(
+                examples[path],
+                padding=True,
+                truncation=True,
+                max_length=max_len,
+                return_tensors="pt",
+            )
+            return {
+                "input_ids_" + path: token_dict["input_ids"],
+                "attention_mask_" + path: token_dict["attention_mask"],
+            }
+
         return {
-            "input_ids_query": tokenized_query["input_ids"],
-            "attention_mask_query": tokenized_query["attention_mask"],
-            "input_ids_pos": tokenized_pos["input_ids"],
-            "attention_mask_pos": tokenized_pos["attention_mask"],
-            "input_ids_neg": tokenized_neg["input_ids"],
-            "attention_mask_neg": tokenized_neg["attention_mask"],
+            **tokenize("query"),
+            **tokenize("pos"),
+            **tokenize("neg"),
         }
 
 
@@ -156,6 +147,7 @@ class TinyEmbedTrainer(Trainer):
         tokenizer: AutoTokenizer,
         callbacks: Optional[List[TrainerCallback]] = None,
         infonce_temp: float = 0.1,
+        log_cosine_similarities: bool = False,
     ):
         # Consider reworking the model's signature to conform to training expectations
         args.remove_unused_columns = False
@@ -169,6 +161,7 @@ class TinyEmbedTrainer(Trainer):
             callbacks=callbacks,
         )
         self.infonce_temp = infonce_temp
+        self.log_cosine_similarities = log_cosine_similarities
         # self.train_dataset = train_dataset
         # self.eval_dataset = eval_dataset
         # self.tokenizer = tokenizer
@@ -178,7 +171,6 @@ class TinyEmbedTrainer(Trainer):
         pads and truncates the batch for each of the three inputs
         and returns a single dict, with each key
         shape the the List[Dict[str, torch.Tensor]] into a Dict[str, torch.Tensor]
-
         """
 
         def get_field(field: str, length: Optional[int] = None):
@@ -218,11 +210,11 @@ class TinyEmbedTrainer(Trainer):
             **get_field("neg", length),
         }
 
-    def compute_loss(self, model, inputs, return_outputs=False):
-        from datetime import datetime
+    def compute_loss(
+        self, model: LlamaModel, inputs: Dict[str, torch.Tensor], return_outputs=False
+    ):
 
         batch_size = inputs["input_ids_query"].shape[0]
-        # print iso utc 8601 time with milliseconds
         query = get_embeddings(
             model, inputs["input_ids_query"], inputs["attention_mask_query"]
         )
@@ -238,13 +230,28 @@ class TinyEmbedTrainer(Trainer):
         temperature = self.infonce_temp
         # query = [Batch, Embedding] * [Embedding, Batch * 2] = [Batch, Batch * 2]
         scores = torch.matmul(query, all_embeddings.transpose(0, 1)) / temperature
-
-        # Since positive examples are at index 0 in the second dimension of `all_embeddings`, labels are all zeros
         labels = torch.arange(batch_size, device=query.device)
 
         # Use cross entropy loss
         loss_fn = torch.nn.CrossEntropyLoss(reduction="mean")
         loss = loss_fn(scores, labels)
+        # log cosine similarity
+        if self.log_cosine_similarities:
+
+            # Compute cosine similarity between query and positive/negative
+            sim = torch.nn.functional.cosine_similarity(
+                query.repeat_interleave(len(all_embeddings), dim=0),
+                all_embeddings.repeat(batch_size, 1),
+            ).reshape(-1, len(all_embeddings))
+            pos = sum([sim[i][i] for i in range(len(sim))]).item() / len(sim)
+            neg = sum(
+                [
+                    sum([sim[i][j] for j in range(len(sim)) if j != i]).item()
+                    / (len(all_embeddings) - 1)
+                    for i in range(len(sim))
+                ]
+            ) / len(sim)
+            self.log({"pos": pos, "neg": neg})
         return loss
 
 
@@ -252,7 +259,7 @@ def get_embeddings_from_text(
     model: LlamaModel,
     tokenizer: AutoTokenizer,
     text: List[str],
-) -> List[Tuple[str, torch.Tensor]]:
+) -> torch.Tensor:
     tokenized = tokenizer(
         text,
         padding=True,
@@ -263,7 +270,7 @@ def get_embeddings_from_text(
     embeddings = get_embeddings(
         model, tokenized["input_ids"], tokenized["attention_mask"]
     )
-    return [(text[i], embeddings[i]) for i in range(len(text))]
+    return embeddings
 
 
 def get_embeddings(

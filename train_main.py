@@ -25,7 +25,7 @@ from experiment_config import (
     record_trial_params,
     record_trial_result,
 )
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 import os
 
 seed = 42
@@ -48,20 +48,13 @@ class HyperParams:
     adam_beta2: float = 0.999
     adam_epsilon: float = 2e-10
     batch_size: int = 4
-    infonce_temp: float = 0.05
+    infonce_temp: float = 0.01
 
 
-def run(params: HyperParams = HyperParams()):
-    cfg = get_config()
-    resume = False
-    if resume:
-        version = cfg.get("all_version") or 0
-    else:
-        last = cfg.get("all_version") or 0
-        version = last + 1
-        write_config({**cfg, "all_version": version})
-
-    print(f"running experiment {version} with {params}")
+def load_trainer(
+    version: int,
+    params: HyperParams = HyperParams(),
+) -> TinyEmbedTrainer:
     base_model, tokenizer = load_model(bits=4)
 
     model = load_model_for_training(
@@ -91,8 +84,8 @@ def run(params: HyperParams = HyperParams()):
         log_level="info",
         logging_strategy=IntervalStrategy.STEPS,
         gradient_checkpointing=True,
-        logging_steps=5,
-        save_steps=2000,
+        logging_steps=1,
+        save_steps=200,
         num_train_epochs=1,
         seed=seed,
         adam_beta1=params.adam_beta1,
@@ -107,10 +100,27 @@ def run(params: HyperParams = HyperParams()):
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         tokenizer=tokenizer,
+        log_cosine_similarities=True,
     )
+    return trainer
+
+
+def run(params: HyperParams = HyperParams(), resume: bool = False):
+    cfg = get_config()
+    if resume:
+        version = cfg.get("all_version") or 0
+    else:
+        last = cfg.get("all_version") or 0
+        version = last + 1
+        write_config(
+            {**cfg, "all_version": version, f"run_params.{version}": asdict(params)}
+        )
+
+    print(f"running experiment {version} with {params}")
+    trainer = load_trainer(version=version, params=params)
 
     trainer.train(resume_from_checkpoint=resume)
 
 
 if __name__ == "__main__":
-    run()
+    run(resume=True)

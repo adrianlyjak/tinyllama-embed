@@ -1,3 +1,147 @@
 {
-  "all_version": 34
+  "all_version": 44,
+  "run_params.37": {
+    "r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.0,
+    "target_modules": [
+      "q_proj",
+      "v_proj",
+      "o_proj",
+      "down_proj",
+      "up_proj",
+      "gate_proj"
+    ],
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_epsilon": 2e-10,
+    "batch_size": 4,
+    "infonce_temp": 0.01
+  },
+  "run_params.38": {
+    "r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.0,
+    "target_modules": [
+      "q_proj",
+      "v_proj",
+      "o_proj",
+      "down_proj",
+      "up_proj",
+      "gate_proj"
+    ],
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_epsilon": 2e-10,
+    "batch_size": 4,
+    "infonce_temp": 0.01
+  },
+  "run_params.39": {
+    "r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.0,
+    "target_modules": [
+      "q_proj",
+      "v_proj",
+      "o_proj",
+      "down_proj",
+      "up_proj",
+      "gate_proj"
+    ],
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_epsilon": 2e-10,
+    "batch_size": 4,
+    "infonce_temp": 0.01
+  },
+  "run_params.40": {
+    "r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.0,
+    "target_modules": [
+      "q_proj",
+      "v_proj",
+      "o_proj",
+      "down_proj",
+      "up_proj",
+      "gate_proj"
+    ],
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_epsilon": 2e-10,
+    "batch_size": 4,
+    "infonce_temp": 0.01
+  },
+  "run_params.41": {
+    "r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.0,
+    "target_modules": [
+      "q_proj",
+      "v_proj",
+      "o_proj",
+      "down_proj",
+      "up_proj",
+      "gate_proj"
+    ],
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_epsilon": 2e-10,
+    "batch_size": 4,
+    "infonce_temp": 0.01
+  },
+  "run_params.42": {
+    "r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.0,
+    "target_modules": [
+      "q_proj",
+      "v_proj",
+      "o_proj",
+      "down_proj",
+      "up_proj",
+      "gate_proj"
+    ],
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_epsilon": 2e-10,
+    "batch_size": 4,
+    "infonce_temp": 0.01
+  },
+  "run_params.43": {
+    "r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.0,
+    "target_modules": [
+      "q_proj",
+      "v_proj",
+      "o_proj",
+      "down_proj",
+      "up_proj",
+      "gate_proj"
+    ],
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_epsilon": 2e-10,
+    "batch_size": 4,
+    "infonce_temp": 0.01
+  },
+  "run_params.44": {
+    "r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.0,
+    "target_modules": [
+      "q_proj",
+      "v_proj",
+      "o_proj",
+      "down_proj",
+      "up_proj",
+      "gate_proj"
+    ],
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_epsilon": 2e-10,
+    "batch_size": 4,
+    "infonce_temp": 0.01
+  }
 }
