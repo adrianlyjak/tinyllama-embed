@@ -8,3 +8,4 @@ bitsandbytes
 optuna
 optuna-dashboard
 tensorboard
+python-dotenv
